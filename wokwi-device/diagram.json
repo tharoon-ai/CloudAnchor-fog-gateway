@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "author": "CloudAnchor Team",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht",
+      "top": -160,
+      "left": -120,
+      "attrs": { "temperature": "28.5", "humidity": "55" }
+    },
+    {
+      "type": "wokwi-mpu6050",
+      "id": "mpu",
+      "top": -160,
+      "left": 60,
+      "attrs": { "accelerationX": "0.02", "accelerationY": "0.01", "accelerationZ": "0.99" }
+    },
+    {
+      "type": "wokwi-ina219",
+      "id": "ina",
+      "top": 180,
+      "left": -140,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-potentiometer",
+      "id": "mq2",
+      "top": 180,
+      "left": 80,
+      "attrs": { "value": "240" }
+    },
+    {
+      "type": "wokwi-bmp280",
+      "id": "bmp",
+      "top": -80,
+      "left": 220,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+
+    [ "esp:GND.1", "dht:GND", "black", [ "v0" ] ],
+    [ "esp:3V3", "dht:VCC", "red", [ "v0" ] ],
+    [ "esp:15", "dht:SDA", "green", [ "v0" ] ],
+
+    [ "esp:GND.2", "mpu:GND", "black", [ "v0" ] ],
+    [ "esp:3V3", "mpu:VCC", "red", [ "v0" ] ],
+    [ "esp:21", "mpu:SDA", "blue", [ "v0" ] ],
+    [ "esp:22", "mpu:SCL", "yellow", [ "v0" ] ],
+
+    [ "esp:GND.2", "ina:GND", "black", [ "v0" ] ],
+    [ "esp:3V3", "ina:VCC", "red", [ "v0" ] ],
+    [ "esp:21", "ina:SDA", "blue", [ "v0" ] ],
+    [ "esp:22", "ina:SCL", "yellow", [ "v0" ] ],
+
+    [ "esp:GND.1", "mq2:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "mq2:VCC", "red", [ "v0" ] ],
+    [ "esp:34", "mq2:SIG", "orange", [ "v0" ] ],
+
+    [ "esp:GND.2", "bmp:GND", "black", [ "v0" ] ],
+    [ "esp:3V3", "bmp:VCC", "red", [ "v0" ] ],
+    [ "esp:21", "bmp:SDA", "blue", [ "v0" ] ],
+    [ "esp:22", "bmp:SCL", "yellow", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}

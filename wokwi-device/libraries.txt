@@ -1,0 +1,5 @@
+DHT sensor library for ESPx
+ArduinoJson
+Adafruit MPU6050
+Adafruit INA219
+Adafruit BMP280 Library
