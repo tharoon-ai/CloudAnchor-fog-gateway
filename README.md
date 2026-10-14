@@ -1,514 +1,434 @@
 # CloudAnchor: A Fog-Assisted Resilient Gateway for Intermittent Cloud APIs
 
-CloudAnchor is an academic software prototype that demonstrates how a local **fog gateway** can accept telemetry, retain it in a local SQLite database when a cloud API is unavailable, and attempt synchronization after the cloud service becomes available again.
+CloudAnchor is an academic software prototype exploring how a local **fog gateway** can receive telemetry, retain records in local SQLite storage when a cloud API is unavailable, and retry synchronization when the cloud destination becomes available again.
 
-The current demonstration uses **simulated inputs**, a Python telemetry-entry bridge, a FastAPI gateway, and a temporary HTTPS tunnel. It is intended for development and demonstration—not for production or safety-critical deployment.
+The repository includes a FastAPI fog gateway, a separate local Cloud API, a React/Vite dashboard, a Python telemetry simulator, Tinkercad Arduino files, Wokwi ESP32 simulation files, and unit tests.
 
-> **Current implementation note:** This README describes the current workflow discussed for the project: Tinkercad Arduino Uno with three potentiometers, a Python Tkinter bridge, LocalTunnel, and a FastAPI gateway. Some commands below assume the project root is `C:\cloud_final` and the gateway entry point is `backend.main:app`. If your actual folder/module names differ, adjust the command to match your files. Optional components are clearly marked.
-
----
+> **Project status:** This is a development/demo prototype, not a production-ready or safety-critical system. Do not claim “zero data loss” or “100% reliability” unless repeatable tests verify that result. Some sensor values are simulated or derived, not physical sensor measurements.
 
 ## Contents
 
-1. [What CloudAnchor Demonstrates](#1-what-cloudanchor-demonstrates)
-2. [Current Architecture](#2-current-architecture)
-3. [Telemetry Inputs and Calculations](#3-telemetry-inputs-and-calculations)
-4. [Project Requirements](#4-project-requirements)
-5. [Initial Setup](#5-initial-setup)
-6. [Run the Project in Separate Terminals](#6-run-the-project-in-separate-terminals)
-7. [Verify the Services](#7-verify-the-services)
-8. [Demonstrate Cloud Failure and Recovery](#8-demonstrate-cloud-failure-and-recovery)
-9. [Request IDs and Session Behaviour](#9-request-ids-and-session-behaviour)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Repository and Security Checklist](#11-repository-and-security-checklist)
-12. [Current Scope and Future Work](#12-current-scope-and-future-work)
+1. [Project structure](#1-project-structure)
+2. [Architecture and data flow](#2-architecture-and-data-flow)
+3. [Requirements](#3-requirements)
+4. [First-time setup](#4-first-time-setup)
+5. [Run the project in separate terminals](#5-run-the-project-in-separate-terminals)
+6. [Send test telemetry](#6-send-test-telemetry)
+7. [Test cloud outage and recovery](#7-test-cloud-outage-and-recovery)
+8. [Run the tests](#8-run-the-tests)
+9. [Troubleshooting](#9-troubleshooting)
+10. [GitHub and security checklist](#10-github-and-security-checklist)
+11. [Current scope and limitations](#11-current-scope-and-limitations)
 
 ---
 
-## 1. What CloudAnchor Demonstrates
+## 1. Project structure
 
-Cloud APIs and internet connections may become temporarily unavailable. If an application only forwards data directly to the cloud, a failed request may not be delivered. CloudAnchor places a local gateway between the telemetry producer and the cloud API.
-
-The intended workflow is:
-
-1. Prepare a telemetry record using simulated readings.
-2. Submit the record to the FastAPI fog gateway.
-3. Validate the request and retain the accepted record in local SQLite storage.
-4. Forward or synchronize the record to the configured cloud API when the cloud endpoint is reachable.
-5. If the cloud API is unavailable, retain the record as pending and retry according to the implementation's configured recovery logic.
-6. After the cloud API is restored, verify that the **same request ID** is synchronized.
-
-The core idea is **reliable local retention and later synchronization**, not the use of any one sensor or the display of animated dashboard events.
-
-## 2. Current Architecture
+The repository's current top-level layout is:
 
 ```text
-Tinkercad Arduino Uno
-(3 potentiometers used as simulated inputs)
-           |
-           | Read the simulated values in Tinkercad
-           v
-Python Tkinter Telemetry Bridge
-(manual entry in the current workflow)
-           |
-           | HTTPS POST to /api/ingest
-           v
-LocalTunnel HTTPS URL
-           |
-           v
-FastAPI Fog Gateway — port 8000
-           |
-           +----> SQLite local storage / pending queue
-           |
-           +----> Retry / synchronization logic
-                         |
-                         v
-              Cloud API — optionally port 8001
-                         |
-                         v
-              Cloud-side storage, if configured
-
-Optional web dashboard:
-Frontend development server, commonly port 5173
+CloudAnchor-fog-gateway/
+├── ARCHITECTURE.md
+├── README.md
+├── requirements.txt
+├── run_all.ps1
+├── backend/
+│   ├── main.py
+│   ├── database.py
+│   ├── circuit_breaker.py
+│   ├── multi_sensor_fusion.py
+│   └── telemetry_cache.py
+├── cloud_api/
+│   └── main.py
+├── frontend/
+│   ├── package.json
+│   └── src/
+├── simulator/
+│   └── device_simulator.py
+├── tests/
+├── tinkercad/
+│   ├── arduino_telemetry.ino
+│   └── tinkercad_bridge.py
+└── wokwi-device/
+    ├── diagram.json
+    ├── libraries.txt
+    └── wokwi-device.ino
 ```
 
-### Important distinction about Tinkercad
+The `frontend` folder contains the dashboard source. The `simulator` folder contains a Python telemetry simulator. The `tinkercad` and `wokwi-device` folders contain simulation-related files; they represent different simulation paths, so follow the instructions for the source you actually intend to use.
 
-The current Tkinter bridge does **not** directly read Tinkercad's Serial Monitor as a local Windows COM port. In this version, readings are entered into the bridge GUI manually, and the Python bridge generates the request IDs. Do not describe this as a fully automatic serial connection from Tinkercad to Python.
+## 2. Architecture and data flow
 
-### Component summary
+```text
+Telemetry source
+  ├── Python simulator (simulator/device_simulator.py)
+  ├── Tinkercad Arduino files (tinkercad/)
+  └── Wokwi ESP32 files (wokwi-device/)
+             |
+             v
+FastAPI Fog Gateway (port 8000)
+             |
+             +--> Validate and process incoming telemetry
+             |
+             +--> Retain records / queue state in local SQLite
+             |
+             +--> Retry and synchronization logic
+                          |
+                          v
+                 Cloud API (port 8001, local demo)
 
-| Component | Role | Typical location or endpoint |
-|---|---|---|
-| Tinkercad simulation | Provides simulated analog inputs | Arduino Uno with potentiometers on A0, A1, and A2 |
-| Python Tkinter bridge | Collects values, derives selected fields, creates a request ID, and submits telemetry | `serial-bridge/bridge.py` |
-| LocalTunnel | Exposes the local gateway through a temporary HTTPS URL | `https://<current-subdomain>.loca.lt` |
-| FastAPI fog gateway | Receives and processes telemetry | `http://127.0.0.1:8000`; `POST /api/ingest` |
-| SQLite | Stores local telemetry/queue state according to the backend implementation | Database path is determined by backend configuration |
-| Cloud API | Destination for synchronization when configured and available | Often `http://127.0.0.1:8001` in the local demonstration |
-| Frontend dashboard (optional) | Displays backend state and telemetry | Development URL printed by the frontend command; commonly port 5173 |
+Optional React/Vite dashboard (commonly port 5173)
+```
 
-## 3. Telemetry Inputs and Calculations
+The intended resilience demonstration is: submit a telemetry record, make the cloud destination unavailable while leaving the gateway running, submit another record, verify that the gateway retained it locally, restore the cloud destination, then confirm the same record is synchronized.
 
-The current demonstration uses three potentiometers connected to an Arduino Uno in Tinkercad.
+**Important:** A successful HTTP response from the gateway does not by itself prove that cloud synchronization completed. Verify the queue/database, backend logs, or the cloud-side record.
 
-| Field | Input or calculation | Meaning |
-|---|---|---|
-| Temperature | Potentiometer on A0 mapped to roughly 15–50 °C | Simulated temperature; not a DHT22 measurement |
-| Humidity | Potentiometer on A1 mapped to roughly 20–90% | Simulated humidity; not a physical humidity-sensor measurement |
-| Voltage | Potentiometer on A2 mapped to roughly 3–12 V | Simulated voltage; not an INA219 measurement |
-| Current | Derived in the Python bridge from the configured simulated relationship | Estimated/demo value, not a measured current-sensor reading |
-| Power | Calculated using voltage and current | `Power (W) = Voltage (V) × Current (mA) / 1000` |
-| Health score, status, and risk | Derived using the rules implemented in the bridge and/or gateway | Calculated indicators, not direct sensor measurements |
+## 3. Requirements
 
-The exact conversion ranges and formulas should match the code currently committed to the repository. If those change, update this table as well.
+Install these tools on your Windows development computer:
 
-## 4. Project Requirements
+- Python 3 and `pip`
+- Node.js and `npm` for the frontend and `npx`-based tools
+- Git (for retrieving or updating the repository)
+- A modern browser
+- Tinkercad or Wokwi access only if you plan to use those simulations
 
-Install the following on the development computer:
-
-- **Windows 10/11** or another OS supported by the project scripts.
-- **Python 3** available through the `python` command.
-- **pip**, normally installed with Python.
-- **Node.js and npm** for running LocalTunnel through `npx` and for the optional frontend.
-- **A web browser** for the FastAPI documentation and optional dashboard.
-- **Internet access** while using LocalTunnel and any remote cloud API.
-- **Tinkercad account/browser access** to run the Arduino Uno simulation.
-
-Check the installed tools in PowerShell:
+Check availability in PowerShell:
 
 ```powershell
 python --version
 python -m pip --version
 node --version
 npm --version
+git --version
 ```
 
-If a command is not recognized, install that tool and reopen PowerShell before continuing.
+The commands below assume the repository is located at:
 
-## 5. Initial Setup
-
-### Step 5.1 — Open the project folder
-
-Open PowerShell and move to the project root. The examples in this README assume the folder is `C:\cloud_final`:
-
-```powershell
-cd C:\cloud_final
+```text
+C:\CloudAnchor-fog-gateway
 ```
 
-If your project is in a different directory, use that directory instead. Confirm that you are at the project root:
+If you placed it somewhere else, change the `cd` paths accordingly.
+
+## 4. First-time setup
+
+### 4.1 Open the project root
 
 ```powershell
-Get-Location
+cd C:\CloudAnchor-fog-gateway
 Get-ChildItem
 ```
 
-You should see the project files and folders, such as `backend`, `serial-bridge`, and—if included—`cloud_api` and `frontend`.
+You should see folders such as `backend`, `cloud_api`, `frontend`, `simulator`, `tests`, `tinkercad`, and `wokwi-device`.
 
-### Step 5.2 — Create and activate a Python virtual environment
+### 4.2 Create a Python virtual environment
 
-Run these commands from the project root:
+Run once from the project root:
 
 ```powershell
 python -m venv .venv
+```
+
+Activate it in each new PowerShell terminal that will run Python services:
+
+```powershell
+cd C:\CloudAnchor-fog-gateway
 .\.venv\Scripts\Activate.ps1
 ```
 
-If PowerShell blocks activation, run the following **in that PowerShell window**, then activate again:
+If PowerShell blocks activation, run this command in that terminal, then activate again:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
-Activation is normally shown by `(.venv)` at the start of the prompt. This changes the current terminal only.
-
-### Step 5.3 — Install Python dependencies
-
-If `requirements.txt` exists in the project root, run:
+### 4.3 Install Python dependencies
 
 ```powershell
+cd C:\CloudAnchor-fog-gateway
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-If there is no `requirements.txt`, do not assume this command will work. Check the repository's dependency file or project imports and install the dependencies documented by the project.
+Repeat the activation step in each new terminal before running Python commands. You normally do not need to recreate the virtual environment each time.
 
-### Step 5.4 — Install frontend dependencies (optional)
+### 4.4 Install frontend dependencies
 
-Only do this if the project contains a `frontend` folder with a `package.json` file:
+Run this once, or again whenever the frontend dependency list changes:
 
 ```powershell
-cd C:\cloud_final\frontend
+cd C:\CloudAnchor-fog-gateway\frontend
 npm install
-cd C:\cloud_final
 ```
 
-Do this once during initial setup, and repeat `npm install` if the frontend dependency list changes.
+## 5. Run the project in separate terminals
 
----
+**Open a separate PowerShell terminal for each service and leave it running.** Start the Cloud API first when the gateway is configured to use the local Cloud API. Start the gateway next. Run only one telemetry source at a time while testing, so that test records are easier to identify.
 
-## 6. Run the Project in Separate Terminals
+### Terminal 1 — Local Cloud API (port 8001)
 
-**Keep each service in its own terminal window.** Do not close a terminal while you still need the service it runs. Start the optional Cloud API first if your gateway is configured to forward records to it.
-
-### Terminal 1 — Cloud API (optional local destination)
-
-Use this terminal only if the repository contains `cloud_api/main.py` and the gateway is configured to synchronize to that local API. The command assumes the FastAPI application variable is named `app` in that file.
+This service is part of the repository at `cloud_api/main.py`.
 
 ```powershell
-cd C:\cloud_final
+cd C:\CloudAnchor-fog-gateway
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn cloud_api.main:app --host 127.0.0.1 --port 8001
 ```
 
-Keep the terminal open. If it starts correctly, Uvicorn will report that it is running on port `8001`.
-
-Open this address in a browser if that service is running:
+Keep the terminal open. If it starts successfully, open the API documentation at:
 
 `http://127.0.0.1:8001/docs`
 
-**Skip this terminal** if your current project does not contain a separate `cloud_api` application or if the backend is configured to use a different remote cloud endpoint. Do not create or assume a cloud API that is not in your codebase.
+If this service fails to start, read the error in this terminal before proceeding. The gateway must be configured to use the correct cloud API address for synchronization to work.
 
-### Terminal 2 — FastAPI Fog Gateway
+### Terminal 2 — FastAPI Fog Gateway (port 8000)
 
-Open a **new PowerShell window**. Run:
+Open a **new** PowerShell terminal:
 
 ```powershell
-cd C:\cloud_final
+cd C:\CloudAnchor-fog-gateway
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-This command assumes that `backend/main.py` exposes a FastAPI object named `app`. If the module path or application variable differs in your repository, use the matching path instead.
-
-Keep this terminal open. The gateway should report that it is running on port `8000`.
-
-Open the gateway API documentation:
+Keep the terminal open. Check the gateway API documentation:
 
 `http://127.0.0.1:8000/docs`
 
-Confirm that the documentation page loads before moving to the next step. The project bridge submits telemetry to the gateway's `POST /api/ingest` endpoint.
+The local gateway should be running before you submit telemetry or start a tunnel. If the command reports an import error, check that `backend/main.py` exists and that the FastAPI application is exposed as `app`.
 
-### Terminal 3 — LocalTunnel
+### Terminal 3 — LocalTunnel (only if a remote bridge needs to reach your local gateway)
 
-Open another **new PowerShell window**. Run:
+Open a **new** PowerShell terminal:
 
 ```powershell
 npx localtunnel --port 8000
 ```
 
-If prompted, allow `npx` to download/run LocalTunnel. When it starts, it will print a public HTTPS URL similar to:
+If successful, LocalTunnel prints a temporary HTTPS URL, for example:
 
 ```text
-https://some-generated-name.loca.lt
+https://your-generated-name.loca.lt
 ```
 
-Copy the **current URL exactly** and keep this terminal open. The URL is temporary and may change whenever LocalTunnel is restarted.
+Use the exact URL printed in your own terminal. Keep the terminal open while you need the tunnel. The URL can change when LocalTunnel restarts. Do not add `:8000` to the public HTTPS URL.
 
-**Do not add `:8000` to the public URL.** LocalTunnel already forwards the HTTPS URL to your local port 8000.
+If all telemetry is submitted by a Python process on the same computer, a tunnel may not be necessary; use the local gateway URL if the sending code supports it. Never publish a temporary tunnel URL as if it were a permanent endpoint.
 
-### Terminal 4 — Python Tkinter Telemetry Bridge
+### Terminal 4 — Choose a telemetry source
 
-Before starting the bridge, update its URL to match the current LocalTunnel URL.
+Use **one option at a time** during a test.
 
-1. Open `serial-bridge/bridge.py` in VS Code or another text editor.
-2. Find the `GATEWAY_URL` setting.
-3. Replace its value with your current LocalTunnel URL plus `/api/ingest`.
+#### Option A: Python simulator (included in the repository)
 
-Example only:
-
-```python
-GATEWAY_URL = "https://YOUR-CURRENT-SUBDOMAIN.loca.lt/api/ingest"
-```
-
-Replace `YOUR-CURRENT-SUBDOMAIN` with the exact URL printed in Terminal 3. Do not leave the placeholder text in your code.
-
-Then open another **new PowerShell window** and run:
+Open a **new** PowerShell terminal:
 
 ```powershell
-cd C:\cloud_final\serial-bridge
-python bridge.py
+cd C:\CloudAnchor-fog-gateway
+.\.venv\Scripts\Activate.ps1
+python simulator/device_simulator.py --interval 2.5 --devices 2
 ```
 
-A Tkinter window should open. Enter or adjust the simulated values and click the bridge's **Send Telemetry** button. The current bridge workflow creates the next visible request ID when you submit a record, for example `REQ-1`, `REQ-2`, and `REQ-3`.
+This is the repository's local simulator command. Check the script's command-line options if you want to change the interval or number of simulated devices. Use this option when you want to test ingestion without opening Tinkercad.
 
-Keep the bridge window open while submitting records. If the bridge shows a gateway connection error, check the gateway, LocalTunnel URL, and `GATEWAY_URL` setting using the troubleshooting section.
+#### Option B: Tinkercad Arduino files
 
-> **Reminder:** If LocalTunnel restarts and prints a different URL, update `GATEWAY_URL` in `bridge.py` and restart the bridge. Automatic tunnel URL detection is not part of this manual configuration unless you separately implement it.
+The repository includes:
 
-### Terminal 5 — Frontend Dashboard (optional)
+- `tinkercad/arduino_telemetry.ino`
+- `tinkercad/tinkercad_bridge.py`
 
-Use this terminal only if your repository includes a React/Vite or similar frontend in the `frontend` folder with a valid `package.json`.
+Open `tinkercad/arduino_telemetry.ino` in your Tinkercad Arduino Uno simulation and start the simulation there. The exact way the Python bridge receives or forwards data depends on the code in `tinkercad/tinkercad_bridge.py`; inspect its configuration and comments before running it. If it is intended to be run as a standalone Python script, start it from the repository root in a separate terminal:
 
 ```powershell
-cd C:\cloud_final\frontend
+cd C:\CloudAnchor-fog-gateway
+.\.venv\Scripts\Activate.ps1
+python .\tinkercad\tinkercad_bridge.py
+```
+
+Do not describe this as a direct Windows COM-port connection to Tinkercad's Serial Monitor unless that transport has actually been implemented and tested. If using the manual Tkinter bridge from a separate local folder, note that `serial-bridge/bridge.py` is **not present in the current repository tree** shown above; add the intended bridge source to the repository before documenting it as a tracked component.
+
+#### Option C: Wokwi ESP32 simulation
+
+The repository also includes Wokwi files in `wokwi-device/`. Open `wokwi-device/diagram.json` and `wokwi-device/wokwi-device.ino` in the appropriate Wokwi project and follow the wiring and libraries defined there. This is a separate simulation path from the Tinkercad Arduino Uno option; use it only if this is the source you are testing.
+
+### Terminal 5 — Frontend dashboard (optional, commonly port 5173)
+
+Open a **new** PowerShell terminal:
+
+```powershell
+cd C:\CloudAnchor-fog-gateway\frontend
 npm run dev
 ```
 
-If the dependencies have not yet been installed, run `npm install` once in this folder and then run `npm run dev` again.
+The terminal prints the dashboard URL. Open the **actual URL printed**, which is commonly `http://localhost:5173` for Vite. Keep the terminal open while using the dashboard.
 
-The terminal prints the local dashboard URL. For a Vite configuration this is commonly:
+If the dashboard opens but does not show current data, check the frontend API configuration and browser console. The dashboard should use real backend responses; static sample events are not proof of live ingestion or synchronization.
 
-`http://localhost:5173`
+### Optional: repository launcher script
 
-Open the **URL actually printed by the command**. Leave Terminal 5 open while using the dashboard. If the dashboard loads but does not show current telemetry, verify its configured backend API URL and confirm the backend returns real stored data; do not use fake events to make the dashboard appear active.
+The project root includes `run_all.ps1`. If you want to use the bundled launcher, inspect its commands first and then run it from the project root:
 
-### Startup checklist
-
-Before submitting telemetry, check that:
-
-- [ ] The optional Cloud API is running, if your gateway uses it.
-- [ ] The Fog Gateway is running on port `8000`.
-- [ ] `http://127.0.0.1:8000/docs` opens.
-- [ ] LocalTunnel is running and its current URL is copied.
-- [ ] `GATEWAY_URL` in `serial-bridge/bridge.py` contains that URL followed by `/api/ingest`.
-- [ ] The Python Tkinter bridge opens without an exception.
-- [ ] The frontend is running, if you are using it.
-
----
-
-## 7. Verify the Services
-
-### Check the local gateway
-
-Open:
-
-`http://127.0.0.1:8000/docs`
-
-If this page does not load, the gateway may not be running, the port may be different, or Uvicorn may have failed during startup. Read the full error shown in Terminal 2.
-
-### Check the public tunnel route
-
-Replace the example URL with the current URL printed in Terminal 3 and open:
-
-```text
-https://YOUR-CURRENT-SUBDOMAIN.loca.lt/docs
+```powershell
+cd C:\CloudAnchor-fog-gateway
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run_all.ps1
 ```
 
-If the tunnel page cannot reach the gateway, confirm that Terminal 2 is still running and that LocalTunnel is forwarding port `8000`.
+Use either the launcher or the separate-terminal workflow while debugging—not both at the same time—so that you do not accidentally start duplicate services on the same ports.
 
-### Submit one telemetry record
+## 6. Send test telemetry
 
-1. Open the Tkinter bridge.
-2. Enter the test values.
-3. Click **Send Telemetry** once.
-4. Note the request ID and the response shown by the bridge.
-5. Check the gateway terminal and API/database state for that same record.
+1. Confirm that the Fog Gateway is running and that `http://127.0.0.1:8000/docs` opens.
+2. Start one telemetry source using Terminal 4.
+3. Submit or generate one test record.
+4. Note the request ID and the response from the source/gateway.
+5. Check the gateway terminal for request processing.
+6. If using the dashboard, confirm that it is querying the live backend.
+7. Check queue status or cloud-side storage separately to determine whether the record has been synchronized.
 
-A response from the bridge shows the result of that HTTP request; it does not by itself prove that the cloud has synchronized the record. Verify the backend's queue status, logs, or cloud-side record as well.
+For a direct API request, use the request schema shown in `http://127.0.0.1:8000/docs`. The exact required JSON fields are defined by the currently running backend; avoid copying a stale sample payload that may not match the schema.
 
-### Optional API request test
+## 7. Test cloud outage and recovery
 
-The exact request body accepted by `/api/ingest` is defined by your backend's request model. Use the schema shown in `http://127.0.0.1:8000/docs` rather than relying on an example payload that may not match the current code. For the primary demonstration, using the Tkinter bridge avoids accidentally sending a payload with missing required fields.
-
----
-
-## 8. Demonstrate Cloud Failure and Recovery
-
-The purpose of this test is to show the **cloud destination becoming unavailable while the local Fog Gateway remains reachable**. Do not stop the gateway or LocalTunnel for this test: if the bridge cannot reach the gateway, the record may never reach SQLite.
+Use a controlled local test. Do not disrupt a real production cloud service.
 
 ### A. Normal operation
 
-1. Start the Cloud API (if configured), Fog Gateway, LocalTunnel, and Tkinter bridge using the terminals above.
-2. Submit one record from the bridge.
-3. Note its request ID.
-4. Verify whether the backend reports it as accepted and whether cloud synchronization succeeds.
-5. Check that the pending queue count/status matches the actual backend state, if the dashboard exposes it.
+1. Start Terminal 1 (Cloud API) and Terminal 2 (Fog Gateway).
+2. Start one telemetry source.
+3. Send a record and note its request ID.
+4. Verify the gateway accepted it and determine whether synchronization succeeded.
 
-### B. Simulate the cloud API becoming unavailable
+### B. Simulate the cloud destination going offline
 
-If you use the local Cloud API in Terminal 1:
+1. Leave the Fog Gateway running.
+2. In **Terminal 1 only**, press `Ctrl+C` to stop the local Cloud API.
+3. Submit another telemetry record.
+4. Inspect the gateway response, logs, and local SQLite/queue state to see whether it remains pending.
 
-1. Keep Terminal 2 (Fog Gateway) and Terminal 3 (LocalTunnel) running.
-2. In **Terminal 1 only**, press `Ctrl+C` to stop the Cloud API.
-3. Submit a new record from the Tkinter bridge and note its request ID.
-4. Check the gateway response, SQLite queue state, and gateway logs to determine whether the record was retained as pending.
+Do not stop the gateway during this test: the purpose is to test retention at the gateway while the cloud destination is unavailable.
 
-If your gateway is configured to use a remote cloud service instead, use that service's safe test/outage method. Do not disrupt a real production service for a demonstration.
+### C. Restore cloud and verify synchronization
 
-### C. Restore the cloud API
-
-If using the local Cloud API, restart it in Terminal 1 with the same command:
+Restart the Cloud API in Terminal 1 using the same command:
 
 ```powershell
-cd C:\cloud_final
+cd C:\CloudAnchor-fog-gateway
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn cloud_api.main:app --host 127.0.0.1 --port 8001
 ```
 
-Then verify in backend logs/database or the cloud-side API that the pending record is retried and synchronized. Look for the **same request ID** submitted during the outage. A reliable demonstration should verify the status change and confirm that the record is not duplicated.
+Then inspect gateway logs, queue state, or cloud-side storage. Verify that the **same request ID** from the outage test reaches the synchronized state and that the record is not duplicated. A green dashboard indicator alone is not sufficient proof of recovery.
 
-**Do not claim “zero data loss” simply because a dashboard turns green.** Confirm it from the local queue, gateway logs, or cloud-side data. Results depend on the implementation and the test performed.
+## 8. Run the tests
 
----
-
-## 9. Request IDs and Session Behaviour
-
-In the current manual Tkinter workflow:
-
-- The bridge creates visible request IDs such as `REQ-1`, `REQ-2`, and `REQ-3` when the user submits telemetry.
-- The counter currently resets when the bridge process is restarted.
-- This workflow does not directly obtain the request ID from Tinkercad's Serial Monitor.
-- If IDs restart for a new session, the backend should use its internal record ID and/or a session identifier to distinguish records in storage while preserving the visible request ID.
-- When testing recovery, compare the original request ID before and after synchronization to verify that the same record was retained.
-
-Avoid manually changing an ID midway through a test. If a test requires unique IDs across bridge restarts, implement and test a persistent counter or session ID rather than assuming the current in-memory counter is persistent.
-
----
-
-## 10. Troubleshooting
-
-### Problem: `ModuleNotFoundError` or a package is missing
-
-Activate the intended virtual environment and install the project's declared dependencies:
+From the project root, activate the virtual environment and run the unit tests:
 
 ```powershell
-cd C:\cloud_final
+cd C:\CloudAnchor-fog-gateway
+.\.venv\Scripts\Activate.ps1
+python -m unittest discover -s tests -v
+```
+
+The repository contains test files for areas including the circuit breaker, queue, telemetry ingestion, fusion logic, backoff, and cache. The test command reports the actual result on your machine; do not claim that all tests pass unless the run completes successfully.
+
+## 9. Troubleshooting
+
+### `ModuleNotFoundError` or missing package
+
+```powershell
+cd C:\CloudAnchor-fog-gateway
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-Run the command only if `requirements.txt` exists. Check that the same Python environment is used to install dependencies and run Uvicorn or `bridge.py`.
+Make sure you use the same Python environment for installing dependencies and running the service.
 
-### Problem: `Error loading ASGI app` or `Could not import module`
+### `Error loading ASGI app` or `Could not import module`
 
-The command's module path may not match the repository. Confirm that `backend\main.py` exists and exposes the FastAPI object named `app`. If the file or variable has a different name, update the Uvicorn target accordingly.
+Check the working directory and the target module. The expected targets in this repository are:
 
-### Problem: Port 8000 is already in use
+- Gateway: `backend.main:app`
+- Local Cloud API: `cloud_api.main:app`
 
-In PowerShell, check which process is listening:
+Confirm the corresponding file exists and exposes an application named `app`.
+
+### Port 8000 or 8001 is already in use
+
+Find the listener before stopping anything:
 
 ```powershell
 netstat -ano | findstr :8000
+netstat -ano | findstr :8001
 ```
 
-The last column is the PID. Inspect it before taking action:
+The last column is the process ID (PID). Inspect it before stopping it:
 
 ```powershell
 tasklist /FI "PID eq YOUR_PID_HERE"
 ```
 
-Only stop that process if you have confirmed it belongs to an old CloudAnchor server that you intend to stop. Replace `YOUR_PID_HERE` with the actual number. Do not terminate unknown processes.
+Replace `YOUR_PID_HERE` with the actual PID. Only terminate a process after confirming it is an old CloudAnchor process that you intend to stop.
 
-### Problem: The bridge displays `GATEWAY CONNECTION ERROR`
+### LocalTunnel URL does not work
 
-Check these in order:
+- Confirm Terminal 2 is still running on port 8000.
+- Confirm Terminal 3 is still running.
+- Copy the newest LocalTunnel URL.
+- Do not append `:8000` to the public HTTPS URL.
+- Make sure the sending code uses the correct URL and endpoint path.
 
-1. Is Terminal 2 still running without a traceback?
-2. Does `http://127.0.0.1:8000/docs` open locally?
-3. Is Terminal 3 still running?
-4. Did you copy the **latest** LocalTunnel URL?
-5. Does `GATEWAY_URL` end with `/api/ingest` exactly once?
-6. Is the URL using `https://` and does it omit `:8000`?
-7. Did the LocalTunnel URL change after a restart?
+### The gateway accepts a request but the dashboard does not update
 
-### Problem: LocalTunnel works in the browser but the bridge fails
+Check the browser console and `frontend/src/services/api.ts` for the API base URL. Confirm the gateway returns the record and that the dashboard is reading actual backend data rather than static sample data.
 
-Check the complete response or exception shown in the bridge terminal/window. Verify that the gateway endpoint accepts `POST /api/ingest` and that the current bridge payload matches the backend's expected request schema. A browser opening `/docs` confirms that the route can reach the gateway; it does not automatically verify that every POST request is valid.
+### The record remains pending after cloud recovery
 
-### Problem: The request is accepted, but cloud status remains offline or the record stays pending
+Verify that the cloud API is reachable at the address configured in the gateway, review gateway logs, and inspect retry/queue status. Pending status during an outage may be expected; after recovery, verify the same request ID is synchronized.
 
-Confirm that the configured cloud API is running and reachable at the address used in the gateway configuration. If the cloud API runs locally, verify its port and open its `/docs` page. Check gateway logs for connection errors and verify that its retry logic is active. A record remaining pending may be the expected behavior during an outage; after recovery, verify the same request ID becomes synchronized.
+## 10. GitHub and security checklist
 
-### Problem: Dashboard does not show the new record
+Before pushing to a public repository, make sure it does not contain:
 
-Confirm the backend accepted the record and inspect the dashboard's API base URL. Ensure the frontend is reading from the actual gateway/database endpoints, rather than a static sample dataset. Check both the browser developer console and frontend terminal for API errors.
+- API keys, access tokens, passwords, credentials, or private `.env` files
+- private database content, logs, or test data
+- temporary tunnel URLs that are being treated as permanent configuration
+- virtual environments (`.venv/`, `venv/`), Python cache files, or frontend `node_modules/`
 
-### Problem: Tinkercad values are not automatically appearing in the bridge
-
-That is expected in the current manual-entry setup: Python is not reading Tinkercad's Serial Monitor directly. Enter the values in the Tkinter GUI. Automatic serial ingestion would require a different bridge/transport path and should be documented only after it is implemented and tested.
-
----
-
-## 11. Repository and Security Checklist
-
-Before pushing the project to a public GitHub repository, inspect the files being committed. Avoid publishing:
-
-- API keys, tokens, passwords, credentials, or private `.env` files.
-- Python virtual environments such as `.venv/` and `venv/`.
-- `__pycache__/`, `*.pyc`, and temporary build files.
-- Frontend `node_modules/` and generated build output unless intentionally required.
-- Local SQLite databases (`*.db`, `*.sqlite`, `*.sqlite3`) if they contain private data, test history, or machine-specific paths.
-- Logs, local-only configuration, temporary URLs, or private records.
-
-A Python `.gitignore` is useful, but it will not automatically remove files already tracked by Git. Review the staged changes before committing:
+A `.gitignore` does not automatically remove files already tracked by Git. Review before committing:
 
 ```powershell
 git status --short
 git diff --cached --stat
 ```
 
-If a secret was committed, removing it in a later commit does not guarantee that it is gone from the repository history. Revoke or rotate the exposed credential, then clean up the repository history if necessary.
+If a real secret was committed, deleting it in a later commit is not enough to guarantee removal from Git history. Revoke or rotate the secret first.
 
-## 12. Current Scope and Future Work
+## 11. Current scope and limitations
 
-### Current scope
+### Current repository scope
 
-- Simulated analog inputs using Tinkercad Arduino Uno and potentiometers.
-- Manual telemetry submission through a Python Tkinter GUI.
-- Request ID generation by the bridge in the current workflow.
-- FastAPI ingestion at `/api/ingest`.
-- SQLite-based local retention and pending-queue workflow, as implemented by the backend.
-- Cloud synchronization/retry behavior when a cloud endpoint is configured.
-- Optional frontend dashboard if included in the project checkout.
+- FastAPI fog gateway and local SQLite-backed persistence/queue logic
+- Separate local Cloud API implementation
+- React/Vite frontend dashboard
+- Python telemetry simulator
+- Tinkercad Arduino Uno source and Python bridge files
+- Wokwi ESP32 simulation files
+- Unit tests for selected gateway and resilience components
 
 ### Limitations
 
-- Values are simulated or derived; the current demo does not establish physical measurement accuracy.
-- The manual bridge is not a direct Tinkercad Serial Monitor connection.
-- LocalTunnel URLs are temporary and are intended for development/demo use, not permanent production hosting.
-- Data retention and recovery should be demonstrated with repeatable failure-and-recovery tests. Avoid promising absolute or 100% reliability without evidence from those tests.
-- The project is an academic prototype and is not intended for safety-critical or production deployment.
-
-### Possible future improvements
-
-- Automatically discover the current LocalTunnel URL and pass it to the bridge.
-- Add a tested serial, MQTT, or other transport adapter for automatic telemetry ingestion.
-- Add persistent request/session identifiers across bridge restarts.
-- Expand automated tests for database persistence, gateway restarts, retry behavior, and duplicate prevention.
-- Add authentication, authorization, and secure deployment configuration before exposing the gateway beyond a controlled demo.
+- Telemetry may be simulated or derived; it should not be represented as measured physical sensor data unless actual hardware is connected and used.
+- Tinkercad's Serial Monitor is not automatically a local Windows COM port. Only claim automatic serial ingestion if the bridge implements and verifies that transport.
+- LocalTunnel URLs are temporary and intended for development/demo use, not permanent hosting.
+- Reliability depends on the implementation and test conditions. Demonstrate retention, retries, and recovery with evidence rather than promising absolute reliability.
+- This is an academic prototype, not a production or safety-critical deployment.
 
 ## License
 
-No license has been selected for this repository yet. Until a license is added, do not assume that others have permission to reuse, modify, or redistribute the project's code.
+No license has been selected in this repository yet. Until a license is added, do not assume that others have permission to reuse, modify, or redistribute the project's code.
